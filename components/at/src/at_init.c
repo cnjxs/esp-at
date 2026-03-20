@@ -171,8 +171,8 @@ int esp_at_ready_before(void)
             return 1;
         }    
     }
-    return 0;
 #endif
+    return 0;
 }
 
 
