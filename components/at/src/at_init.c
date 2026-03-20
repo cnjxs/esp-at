@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -10,8 +10,6 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_wifi.h"
-#include "esp_freertos_hooks.h"
-#include "esp_timer.h"
 #include "esp_log.h"
 
 #if defined(CONFIG_BT_ENABLED)
@@ -35,7 +33,6 @@
 const char *g_at_mfg_nvs_name = "mfg_nvs";
 
 // static variables
-static volatile int64_t s_last_idle_enter_us = 0;
 static const char *s_ready_str = "\r\nready\r\n";
 static at_mfg_params_storage_mode_t s_at_param_mode = AT_PARAMS_NONE;
 static const char *TAG = "at-init";
@@ -138,13 +135,47 @@ static void at_bt_controller_mem_release(void)
 }
 #endif
 
-__attribute__((weak)) void esp_at_ready_before(void)
+
+
+
+typedef struct 
+{
+    char *cmd;
+    char *check_str;
+    uint32_t timeout;
+}esp_cmd_t;
+
+const esp_cmd_t esp_cmd_init[] = 
+{
+    {"ATE0\r\n","OK",2000},                     //关回显
+    {"AT+CWAUTOCONN=0\r\n","OK",2000},          //关开机自动连接
+    {"AT+SLEEPWKCFG=2,5,0\r\n","OK",2000},      //设置唤醒pin
+    {"AT+CWMODE=1\r\n","OK",2000},              //站模式
+    {"AT+SLEEP=2\r\n","OK",2000},               //休眠
+};
+
+int esp_at_ready_before(void)
 {
 #ifdef CONFIG_AT_SELF_COMMAND_SUPPORT
-    at_exe_cmd("AT+GMR\r\n", "OK", 1000);
-    at_exe_cmd("AT+SYSRAM?\r\n", "OK", 1000);
+    for(uint8_t i = 0;i < sizeof(esp_cmd_init) / sizeof(esp_cmd_init[0]);i++)
+    {
+        ESP_LOGI(TAG,"设置:%s,%s,%d",esp_cmd_init[i].cmd,esp_cmd_init[i].check_str,esp_cmd_init[i].timeout);
+        esp_err_t ret = at_exe_cmd(esp_cmd_init[i].cmd,esp_cmd_init[i].check_str,esp_cmd_init[i].timeout);
+        if(ret == ESP_OK)
+        {
+            ESP_LOGI(TAG,"命令设置成功");
+        }
+        else
+        {
+            ESP_LOGI(TAG,"命令设置失败");
+            return 1;
+        }    
+    }
+    return 0;
 #endif
 }
+
+
 
 static esp_err_t at_module_config_init(void)
 {
@@ -165,8 +196,6 @@ static esp_err_t at_module_config_init(void)
         }
         esp_at_set_module_id_by_str(buffer);
         nvs_close(handle);
-
-#ifdef ESP_AT_LEGACY_SUPPORT
     } else if (mode == AT_PARAMS_IN_PARTITION) {
         // deprecated way
         const esp_partition_t *partition = esp_at_custom_partition_find(0x40, 0xff, "factory_param");
@@ -188,7 +217,6 @@ static esp_err_t at_module_config_init(void)
             const char *module_name = buffer + 56;
             esp_at_set_module_id_by_str(module_name);
         }
-#endif
     } else {
         return ESP_FAIL;
     }
@@ -241,8 +269,6 @@ static esp_err_t at_wifi_config_init(void)
         country.policy = WIFI_COUNTRY_POLICY_MANUAL;
         esp_wifi_set_country(&country);
         nvs_close(handle);
-
-#ifdef ESP_AT_LEGACY_SUPPORT
     } else if (mode == AT_PARAMS_IN_PARTITION) {
         // deprecated way
         const esp_partition_t *partition = esp_at_custom_partition_find(0x40, 0xff, "factory_param");
@@ -282,7 +308,6 @@ static esp_err_t at_wifi_config_init(void)
             country.policy = WIFI_COUNTRY_POLICY_MANUAL;
             esp_wifi_set_country(&country);
         }
-#endif
     } else {
         return ESP_FAIL;
     }
@@ -325,26 +350,6 @@ static IRAM_ATTR void at_alloc_failed_cb(size_t requested_size, uint32_t caps, c
     esp_rom_printf(DRAM_STR(LOG_ANSI_COLOR_REGULAR(LOG_ANSI_COLOR_RED) "alloc failed, size:%u, caps:0x%x" LOG_ANSI_COLOR_RESET "\n"), requested_size, caps);
 }
 
-static bool at_idle_hook_cb(void)
-{
-    s_last_idle_enter_us = esp_timer_get_time();
-    return true;
-}
-
-void esp_at_yield_if_idle_timeout(uint32_t idle_timeout_ms, uint32_t yield_ticks)
-{
-    int64_t idle_gap_us = esp_timer_get_time() - s_last_idle_enter_us;
-    const int64_t threshold_us = (int64_t)idle_timeout_ms * 1000;
-
-    if (idle_gap_us < threshold_us) {
-        return;
-    }
-
-    if (yield_ticks > 0) {
-        vTaskDelay(yield_ticks);
-    }
-}
-
 #ifdef CONFIG_AT_DEBUG
 static void at_reconfigure_twdt(void)
 {
@@ -383,9 +388,6 @@ void esp_at_init(void)
 
     // register the callback function to be invoked if a memory allocation operation fails
     heap_caps_register_failed_alloc_callback(at_alloc_failed_cb);
-
-    // register idle hook to track last idle timestamp for watchdog prevention
-    esp_register_freertos_idle_hook(at_idle_hook_cb);
 
 #ifdef CONFIG_AT_DEBUG
     // reconfigure task watchdog timer to cancel the panic trigger when AT_DEBUG is enabled
@@ -433,9 +435,6 @@ void esp_at_init(void)
     at_cmd_set_terminator(CONFIG_AT_COMMAND_TERMINATOR);
 #endif
 
-    // do some special things before AT is ready
-    esp_at_ready_before();
-
 #if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) && !defined(CONFIG_BOOTLOADER_COMPRESSED_ENABLED)
     // indicate that the running app is working well for app rollback
     at_ota_mark_app_valid_cancel_rollback();
@@ -444,6 +443,12 @@ void esp_at_init(void)
     // once the interface is started, the AT command can be received and processed
     at_interface_start();
 
-    esp_at_ready();
+    // do some special things before AT is ready
+    if(esp_at_ready_before())
+    {
+        esp_at_port_active_write_data((uint8_t *)"ERROR", strlen("ERROR"));
+    }
+    else
+        esp_at_ready();
     ESP_LOGD(TAG, "esp_at_init done");
 }

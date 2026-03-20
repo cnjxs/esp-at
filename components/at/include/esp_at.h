@@ -100,7 +100,7 @@ at_mfg_params_storage_mode_t at_get_mfg_params_storage_mode(void);
  *        a) execute some preset AT commands by calling at_exe_cmd() API.
  *        b) do some initializations by calling APIs from esp-idf or esp-at.
  */
-void esp_at_ready_before(void);
+int esp_at_ready_before(void);
 
 #ifdef CONFIG_AT_SELF_COMMAND_SUPPORT
 /**

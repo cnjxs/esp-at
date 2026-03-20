@@ -5,6 +5,7 @@ set(includes "include")
 
 # Add more required components you need here, separated by spaces
 set(require_components at freertos nvs_flash)
+set(require_components at freertos esp_http_client)
 
 idf_component_register(
     SRCS ${srcs}
